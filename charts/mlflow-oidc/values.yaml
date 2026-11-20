@@ -1,0 +1,125 @@
+# OIDC authentication settings for the mlflow-oidc-auth plugin.
+#
+# Each setting maps to one of the plugin's environment variables (shown in
+# brackets). Empty strings and nulls are omitted, so the plugin's own default
+# applies. See https://github.com/mlflow-oidc/mlflow-oidc-auth/blob/main/docs/configuration.md
+# for the full reference.
+#
+# Non-secret settings are rendered into a ConfigMap and secret settings into a
+# Secret, both named `resourceName` and loaded into the MLflow container via
+# `mlflow.envFrom` below. Changing them does not restart the pods; run
+# `kubectl rollout restart deployment/<name>` after `helm upgrade`.
+oidc:
+  # Name of the ConfigMap and Secret this chart creates. The upstream chart
+  # cannot template `envFrom`, so this name is also written literally in
+  # `mlflow.envFrom`. Change both together, e.g. when installing two releases
+  # into one namespace.
+  resourceName: mlflow-oidc
+
+  # OpenID Connect discovery document URL [OIDC_DISCOVERY_URL]. Required.
+  # Example: https://login.example.com/realms/main/.well-known/openid-configuration
+  discoveryUrl: ""
+  # [OIDC_CLIENT_ID]. Required.
+  clientId: ""
+  # Client secret [OIDC_CLIENT_SECRET]. Stored in the Secret. Required unless
+  # publicClient is true or secret.create is false.
+  clientSecret: ""
+  # Secret-less client using PKCE [OIDC_PUBLIC_CLIENT].
+  publicClient: null
+  # Callback URL registered with the IdP, e.g. https://mlflow.example.com/callback
+  # [OIDC_REDIRECT_URI]. Auto-detected from the request when empty; behind an
+  # ingress, set trustedProxies so the external scheme and host are detected.
+  redirectUri: ""
+  # Comma-separated scopes [OIDC_SCOPE]. Plugin default: openid,email,profile
+  scope: ""
+  # Login button label [OIDC_PROVIDER_DISPLAY_NAME].
+  providerDisplayName: ""
+  # Expected audience of bearer tokens [OIDC_AUDIENCE]. Recommended in production.
+  audience: ""
+  # Expected token issuer [OIDC_ISSUER].
+  issuer: ""
+  # Token claim holding the user's groups [OIDC_GROUPS_ATTRIBUTE]. Plugin default: groups
+  groupsAttribute: ""
+  # Claims tried in order for the username [OIDC_USERNAME_FIELD].
+  # Plugin default: email,preferred_username
+  usernameField: ""
+  # Comma-separated groups allowed to log in [OIDC_GROUP_NAME]. Plugin default: mlflow
+  groupName: ""
+  # Group whose members are MLflow admins [OIDC_ADMIN_GROUP_NAME].
+  # Plugin default: mlflow-admin
+  adminGroupName: ""
+  # Permission for resources without an explicit grant [DEFAULT_MLFLOW_PERMISSION].
+  # One of NO_PERMISSIONS (plugin default), READ, EDIT, MANAGE.
+  defaultPermission: ""
+  # Skip the login page and go straight to the IdP [AUTOMATIC_LOGIN_REDIRECT].
+  automaticLoginRedirect: null
+  # Proxy addresses or CIDRs whose X-Forwarded-* headers are trusted
+  # [TRUSTED_PROXIES], e.g. your ingress controller's pod CIDR.
+  trustedProxies: ""
+  # Send the session cookie only over HTTPS [SESSION_COOKIE_SECURE]. Set true
+  # when MLflow is served over HTTPS (directly or via the ingress).
+  sessionCookieSecure: null
+
+  # SQLAlchemy URI of the plugin's users/permissions database
+  # [OIDC_USERS_DB_URI]. Stored in the Secret. Required when secret.create is
+  # true. Use a separate database from mlflow.mlflow.backendStoreUri, or set
+  # OIDC_ALEMBIC_VERSION_TABLE in extraEnv if they share one. Migrations run
+  # automatically at startup.
+  # Examples: "postgresql://user:pass@postgres:5432/mlflow_auth"
+  #           "sqlite:////mlflow/auth.db" (single replica, with mlflow.storage.enabled)
+  usersDbUri: ""
+
+  # Shared permission cache for multi-replica deployments. When redisUrl is
+  # set, CACHE_BACKEND=redis and CACHE_REDIS_URL are configured (the URL is
+  # stored in the Secret). With the default local cache, permission changes
+  # take up to PERMISSION_CACHE_TTL_SECONDS (30s) to reach other replicas.
+  cache:
+    redisUrl: ""
+
+  # Any other plugin settings, as NAME: value pairs added to the ConfigMap.
+  # Example:
+  #   extraEnv:
+  #     OIDC_USE_REFRESH_TOKEN: "true"
+  #     PERMISSION_CACHE_TTL_SECONDS: "60"
+  extraEnv: {}
+
+  secret:
+    # Create the Secret from the values in this file. Set false to supply your
+    # own Secret named `resourceName` (e.g. from External Secrets or Sealed
+    # Secrets) holding the variables you need: OIDC_CLIENT_SECRET, SECRET_KEY,
+    # OIDC_USERS_DB_URI and, optionally, CACHE_REDIS_URL.
+    create: true
+    # Key used to sign and encrypt session data [SECRET_KEY]. All replicas
+    # must share it. When empty, a random key is generated on install and
+    # reused on upgrade. Set it explicitly with tools that render without
+    # cluster access (helm template, Argo CD), or every render rotates it and
+    # logs everyone out.
+    secretKey: ""
+    # Any other secret plugin settings, as NAME: value pairs.
+    extraEnv: {}
+
+# Values for the upstream MLflow chart (oci://ghcr.io/mlflow/charts/mlflow).
+# Every upstream setting is available under this key; see
+# https://github.com/mlflow/mlflow/blob/master/charts/values.yaml
+# Note the upstream chart's own `mlflow:` block becomes `mlflow.mlflow:` here,
+# e.g. mlflow.mlflow.backendStoreUri.
+mlflow:
+  image:
+    repository: ghcr.io/gradata-systems/mlflow-oidc
+    # Pinned to the image built for this chart version. Format:
+    # v<MLflow version>-oidc<mlflow-oidc-auth version>.
+    tag: "v3.18.0-oidc11.0.5"
+
+  server:
+    value_options:
+      # Loads the plugin. Merged with the upstream defaults (host, port, workers).
+      app_name: oidc-auth
+
+  # Loads the OIDC ConfigMap and Secret. This list replaces, rather than
+  # merges with, anything you set: when adding entries, keep these two and
+  # keep their names equal to oidc.resourceName.
+  envFrom:
+    - configMapRef:
+        name: mlflow-oidc
+    - secretRef:
+        name: mlflow-oidc

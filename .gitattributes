@@ -1,0 +1,2 @@
+# Scripts and YAML must keep LF line endings, including on Windows checkouts.
+* text=auto eol=lf

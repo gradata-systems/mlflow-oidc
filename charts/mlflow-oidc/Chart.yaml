@@ -1,0 +1,17 @@
+apiVersion: v2
+name: mlflow-oidc
+description: MLflow with OIDC authentication (mlflow-oidc-auth), wrapping the upstream MLflow Helm chart
+type: application
+# The chart's own version. Bumped by scripts/versions.py: minor for an
+# MLflow upgrade, patch for a plugin upgrade. Bump manually for template changes.
+version: "1.0.0"
+# MLflow version. Must match the `mlflow` dependency version and the image tag
+# in values.yaml; `python scripts/versions.py check` enforces this.
+appVersion: "3.18.0"
+annotations:
+  mlflow-oidc-auth/version: "11.0.5"
+  org.opencontainers.image.source: https://github.com/gradata-systems/mlflow-oidc
+dependencies:
+  - name: mlflow
+    version: "3.18.0"
+    repository: oci://ghcr.io/mlflow/charts

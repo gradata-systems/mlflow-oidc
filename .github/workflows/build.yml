@@ -1,0 +1,193 @@
+# Builds and tests the image and chart on every PR, and publishes them to
+# ghcr.io on main. See README.md.
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+permissions: {}
+
+jobs:
+  chart:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      chart_name: ${{ steps.versions.outputs.chart_name }}
+      chart_version: ${{ steps.versions.outputs.chart_version }}
+      chart_registry: ${{ steps.versions.outputs.chart_registry }}
+      mlflow_version: ${{ steps.versions.outputs.mlflow_version }}
+      oidc_auth_version: ${{ steps.versions.outputs.oidc_auth_version }}
+      image_repository: ${{ steps.versions.outputs.image_repository }}
+      image_tag: ${{ steps.versions.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check version pins
+        id: versions
+        run: |
+          python3 scripts/versions.py check
+          python3 scripts/versions.py show | tee -a "$GITHUB_OUTPUT"
+
+      - run: bash scripts/test-chart.sh
+
+  image:
+    needs: chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        env:
+          MLFLOW_VERSION: ${{ needs.chart.outputs.mlflow_version }}
+          OIDC_AUTH_VERSION: ${{ needs.chart.outputs.oidc_auth_version }}
+        run: |
+          docker build \
+            --build-arg MLFLOW_VERSION="$MLFLOW_VERSION" \
+            --build-arg MLFLOW_OIDC_AUTH_VERSION="$OIDC_AUTH_VERSION" \
+            -t mlflow-oidc:ci \
+            docker
+
+      - name: Smoke test image
+        env:
+          MLFLOW_VERSION: ${{ needs.chart.outputs.mlflow_version }}
+          OIDC_AUTH_VERSION: ${{ needs.chart.outputs.oidc_auth_version }}
+        run: bash scripts/smoke-test-image.sh mlflow-oidc:ci "$MLFLOW_VERSION" "$OIDC_AUTH_VERSION"
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+
+      - name: Deploy chart to Kind
+        run: |
+          kind load docker-image mlflow-oidc:ci --name chart-testing
+          helm dependency build charts/mlflow-oidc
+          helm install mlflow charts/mlflow-oidc \
+            --set mlflow.image.repository=mlflow-oidc \
+            --set mlflow.image.tag=ci \
+            --set mlflow.image.pullPolicy=Never \
+            --set mlflow.fullnameOverride=mlflow \
+            --set mlflow.mlflow.backendStoreUri=sqlite:////tmp/mlflow.db \
+            --set mlflow.mlflow.artifactsDestination=/tmp/mlartifacts \
+            --set oidc.usersDbUri=sqlite:////tmp/auth.db \
+            --set oidc.discoveryUrl=https://idp.invalid/.well-known/openid-configuration \
+            --set oidc.clientId=ci \
+            --set oidc.clientSecret=ci \
+            --wait \
+            --timeout 5m
+
+      - name: Verify authentication is enforced in the cluster
+        run: |
+          kubectl port-forward svc/mlflow 5000:5000 &
+          curl --retry 10 --retry-connrefused --retry-delay 3 --fail -s http://localhost:5000/health
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/api/2.0/mlflow/experiments/search)
+          if [[ "$status" != 401 ]]; then
+            echo "Expected the tracking API to return 401 without a session, got $status" >&2
+            exit 1
+          fi
+
+      - name: Print container logs
+        if: always()
+        run: kubectl logs -l app.kubernetes.io/name=mlflow --tail=-1 || true
+
+  publish:
+    needs: [chart, image]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write # to push the image and chart to ghcr.io
+    env:
+      CHART_NAME: ${{ needs.chart.outputs.chart_name }}
+      CHART_VERSION: ${{ needs.chart.outputs.chart_version }}
+      CHART_REGISTRY: ${{ needs.chart.outputs.chart_registry }}
+      MLFLOW_VERSION: ${{ needs.chart.outputs.mlflow_version }}
+      OIDC_AUTH_VERSION: ${{ needs.chart.outputs.oidc_auth_version }}
+      IMAGE: ${{ needs.chart.outputs.image_repository }}
+      IMAGE_TAG: ${{ needs.chart.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # Published versions are immutable: a tag that already exists is skipped,
+      # never overwritten. Bump the pins (scripts/versions.py) to publish.
+      - name: Check what is already published
+        id: published
+        run: |
+          if docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=false" >> "$GITHUB_OUTPUT"
+          fi
+          if helm show chart "$CHART_REGISTRY/$CHART_NAME" --version "$CHART_VERSION" > /dev/null 2>&1; then
+            echo "chart=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "chart=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        if: steps.published.outputs.image == 'false'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up Docker Buildx
+        if: steps.published.outputs.image == 'false'
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - name: Build and push image
+        if: steps.published.outputs.image == 'false'
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg MLFLOW_VERSION="$MLFLOW_VERSION" \
+            --build-arg MLFLOW_OIDC_AUTH_VERSION="$OIDC_AUTH_VERSION" \
+            --tag "$IMAGE:$IMAGE_TAG" \
+            --tag "$IMAGE:latest" \
+            --push \
+            docker
+
+      - name: Package and push chart
+        if: steps.published.outputs.chart == 'false'
+        run: |
+          helm dependency build "charts/$CHART_NAME"
+          helm package "charts/$CHART_NAME"
+          helm push "$CHART_NAME-$CHART_VERSION.tgz" "$CHART_REGISTRY"
+
+      - name: Summarize
+        env:
+          IMAGE_PUBLISHED: ${{ steps.published.outputs.image }}
+          CHART_PUBLISHED: ${{ steps.published.outputs.chart }}
+        run: |
+          image_state=$([[ "$IMAGE_PUBLISHED" == true ]] && echo "already published, skipped" || echo "pushed")
+          chart_state=$([[ "$CHART_PUBLISHED" == true ]] && echo "already published, skipped" || echo "pushed")
+          {
+            echo "### MLflow $MLFLOW_VERSION + mlflow-oidc-auth $OIDC_AUTH_VERSION"
+            echo "- Image \`$IMAGE:$IMAGE_TAG\`: $image_state"
+            echo "- Chart \`$CHART_REGISTRY/$CHART_NAME\` version \`$CHART_VERSION\`: $chart_state"
+          } >> "$GITHUB_STEP_SUMMARY"

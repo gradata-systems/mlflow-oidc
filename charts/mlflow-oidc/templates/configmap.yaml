@@ -1,0 +1,9 @@
+{{- include "mlflow-oidc.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.oidc.resourceName }}
+  labels:
+    {{- include "mlflow-oidc.labels" . | nindent 4 }}
+data:
+  {{- include "mlflow-oidc.configEnv" . | trim | nindent 2 }}

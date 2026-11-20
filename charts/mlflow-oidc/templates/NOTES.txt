@@ -1,0 +1,16 @@
+MLflow {{ .Chart.AppVersion }} with mlflow-oidc-auth {{ index .Chart.Annotations "mlflow-oidc-auth/version" }} is deploying.
+
+OIDC settings are in ConfigMap and Secret "{{ .Values.oidc.resourceName }}".
+Pods do not restart when these change; after editing OIDC values run:
+
+  kubectl -n {{ .Release.Namespace }} rollout restart deployment/{{ .Values.mlflow.fullnameOverride | default (printf "%s-mlflow" .Release.Name) }}
+
+Register this callback URL with your identity provider:
+
+  {{ .Values.oidc.redirectUri | default "https://<your MLflow host>/callback" }}
+{{- if and .Values.oidc.secret.create (not .Values.oidc.secret.secretKey) }}
+
+SECRET_KEY was generated and stored in the Secret. If you render this chart
+without cluster access (helm template, Argo CD), set oidc.secret.secretKey,
+or the key changes on every render and logs every user out.
+{{- end }}

@@ -1,0 +1,93 @@
+# Opens a PR when a newer MLflow or mlflow-oidc-auth release has been out for
+# the cooldown period. Merging it publishes a new image and chart. Action pins
+# are bumped by Dependabot instead (.github/dependabot.yml). See README.md.
+#
+# Requires the BUMP_TOKEN secret: a fine-grained personal access token (or
+# GitHub App token) for this repository with Contents and Pull requests
+# read/write. GITHUB_TOKEN would work, but PRs it opens don't trigger CI.
+name: Bump versions
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      cooldown_days:
+        description: Ignore MLflow and plugin releases newer than this many days
+        required: false
+        default: "7"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+permissions: {}
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # pushes and PRs use BUMP_TOKEN so the PR triggers CI
+    env:
+      BRANCH: bump/versions
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Upgrade version pins
+        id: upgrade
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COOLDOWN_DAYS: ${{ inputs.cooldown_days || '7' }}
+        run: python3 scripts/versions.py upgrade --cooldown-days "$COOLDOWN_DAYS"
+
+      - name: Refresh Chart.lock and test the chart
+        if: steps.upgrade.outputs.changed == 'true'
+        run: |
+          helm dependency update charts/mlflow-oidc
+          python3 scripts/versions.py check
+          bash scripts/test-chart.sh
+
+      - name: Open or update pull request
+        if: steps.upgrade.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_TOKEN }}
+          REPO: ${{ github.repository }}
+          MLFLOW_VERSION: ${{ steps.upgrade.outputs.mlflow_version }}
+          OIDC_AUTH_VERSION: ${{ steps.upgrade.outputs.oidc_auth_version }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::error::The BUMP_TOKEN secret is not set; see README.md"
+            exit 1
+          fi
+          title="Bump to MLflow $MLFLOW_VERSION and mlflow-oidc-auth $OIDC_AUTH_VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add charts/mlflow-oidc
+          git commit -s -m "$title"
+          git push --force "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" "$BRANCH"
+
+          body=$(cat <<EOF
+          Automated by \`.github/workflows/bump.yml\`.
+
+          - MLflow: [$MLFLOW_VERSION](https://github.com/mlflow/mlflow/releases/tag/v$MLFLOW_VERSION)
+          - mlflow-oidc-auth: [$OIDC_AUTH_VERSION](https://pypi.org/project/mlflow-oidc-auth/$OIDC_AUTH_VERSION/)
+
+          Merging publishes a new image and chart. Before upgrading a deployment
+          to a new MLflow minor release, check the release notes for database
+          migrations and run \`mlflow db upgrade\` against the tracking database.
+          EOF
+          )
+          if pr=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number') && [[ -n "$pr" ]]; then
+            gh pr edit "$pr" --repo "$REPO" --title "$title" --body "$body"
+          else
+            gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body "$body"
+          fi

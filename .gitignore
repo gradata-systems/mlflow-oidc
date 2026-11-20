@@ -1,0 +1,4 @@
+# helm package output
+*.tgz
+.ruff_cache/
+__pycache__/

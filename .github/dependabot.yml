@@ -1,0 +1,17 @@
+version: 2
+
+# Only the workflow actions. The MLflow and plugin versions are pinned in
+# several files that must change together, which Dependabot can't do; the
+# Bump versions workflow (.github/workflows/bump.yml) handles those.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Skip releases until they're a week old, in case they're broken or pulled.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"

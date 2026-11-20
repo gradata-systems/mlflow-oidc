@@ -1,0 +1,6 @@
+dependencies:
+- name: mlflow
+  repository: oci://ghcr.io/mlflow/charts
+  version: 3.18.0
+digest: sha256:46aa83e20a78437564900bfed6e5f773da8689dabfa5bc4fbc8333dc22fe6059
+generated: "2026-11-20T16:25:58.3246908+11:00"

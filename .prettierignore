@@ -1,0 +1,3 @@
+# Go templates, which prettier can't parse.
+charts/*/templates/
+charts/*/charts/
