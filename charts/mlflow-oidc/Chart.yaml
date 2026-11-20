@@ -4,7 +4,7 @@ description: MLflow with OIDC authentication (mlflow-oidc-auth), wrapping the up
 type: application
 # The chart's own version. Bumped by scripts/versions.py: minor for an
 # MLflow upgrade, patch for a plugin upgrade. Bump manually for template changes.
-version: "1.0.0"
+version: "1.1.0"
 # MLflow version. Must match the `mlflow` dependency version and the image tag
 # in values.yaml; `python scripts/versions.py check` enforces this.
 appVersion: "3.18.0"

@@ -59,6 +59,11 @@ oidc:
   # Send the session cookie only over HTTPS [SESSION_COOKIE_SECURE]. Set true
   # when MLflow is served over HTTPS (directly or via the ingress).
   sessionCookieSecure: null
+  # Request offline_access and keep the refresh token, so sessions are renewed
+  # silently when the IdP token expires instead of sending the user back to
+  # log in [OIDC_USE_REFRESH_TOKEN]. Some IdPs need offline_access approved
+  # for the client first.
+  useRefreshToken: null
 
   # SQLAlchemy URI of the plugin's users/permissions database
   # [OIDC_USERS_DB_URI]. Stored in the Secret. Required when secret.create is
@@ -68,13 +73,29 @@ oidc:
   # Examples: "postgresql://user:pass@postgres:5432/mlflow_auth"
   #           "sqlite:////mlflow/auth.db" (single replica, with mlflow.storage.enabled)
   usersDbUri: ""
+  # Connection pool for usersDbUri, per server worker process. Unset uses the
+  # SQLAlchemy defaults (5 connections plus 10 overflow). Size it so that
+  # replicas x workers x (size + maxOverflow) fits the database's connection
+  # limit, and set recycleSeconds below any idle-connection timeout between
+  # MLflow and the database (cloud load balancers, PgBouncer).
+  usersDbPool:
+    # [OIDC_DB_POOL_SIZE]
+    size: null
+    # [OIDC_DB_POOL_MAX_OVERFLOW]
+    maxOverflow: null
+    # [OIDC_DB_POOL_RECYCLE_SECONDS]
+    recycleSeconds: null
 
   # Shared permission cache for multi-replica deployments. When redisUrl is
   # set, CACHE_BACKEND=redis and CACHE_REDIS_URL are configured (the URL is
   # stored in the Secret). With the default local cache, permission changes
   # take up to PERMISSION_CACHE_TTL_SECONDS (30s) to reach other replicas.
   cache:
+    # Example: redis://:password@redis-master:6379/0 (rediss:// for TLS)
     redisUrl: ""
+    # Key prefix [CACHE_KEY_PREFIX]. Give each release its own when several
+    # share one Redis database. Plugin default: mlflow_oidc_auth:
+    keyPrefix: ""
 
   # Any other plugin settings, as NAME: value pairs added to the ConfigMap.
   # Example:
@@ -87,7 +108,9 @@ oidc:
     # Create the Secret from the values in this file. Set false to supply your
     # own Secret named `resourceName` (e.g. from External Secrets or Sealed
     # Secrets) holding the variables you need: OIDC_CLIENT_SECRET, SECRET_KEY,
-    # OIDC_USERS_DB_URI and, optionally, CACHE_REDIS_URL.
+    # OIDC_USERS_DB_URI and, optionally, CACHE_REDIS_URL and
+    # SESSION_TOKEN_ENCRYPTION_KEY. With your own Secret, set CACHE_BACKEND:
+    # redis in extraEnv if it holds CACHE_REDIS_URL.
     create: true
     # Key used to sign and encrypt session data [SECRET_KEY]. All replicas
     # must share it. When empty, a random key is generated on install and
@@ -95,8 +118,28 @@ oidc:
     # cluster access (helm template, Argo CD), or every render rotates it and
     # logs everyone out.
     secretKey: ""
+    # Fernet key(s) that encrypt the IdP tokens stored with each session
+    # [SESSION_TOKEN_ENCRYPTION_KEY]: comma-separated urlsafe-base64 32-byte
+    # keys, the first encrypts and all decrypt, so a key can be rotated. When
+    # empty, a key is derived from secretKey, and rotating secretKey makes the
+    # stored tokens unreadable. Generate one with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    sessionTokenEncryptionKey: ""
     # Any other secret plugin settings, as NAME: value pairs.
     extraEnv: {}
+
+# MLflow's tracking database URI, stored in the Secret above (key
+# MLFLOW_BACKEND_STORE_URI) so that its password is not in the Deployment
+# spec, unlike mlflow.mlflow.backendStoreUri. Requires oidc.secret.create, and
+# the upstream chart must be pointed at it:
+#   mlflow:
+#     mlflow:
+#       backendStoreUriFrom:
+#         secretKeyRef:
+#           name: mlflow-oidc   # oidc.resourceName
+#           key: MLFLOW_BACKEND_STORE_URI
+# Example: "postgresql://user:pass@postgres:5432/mlflow"
+backendStoreUri: ""
 
 # Values for the upstream MLflow chart (oci://ghcr.io/mlflow/charts/mlflow).
 # Every upstream setting is available under this key; see

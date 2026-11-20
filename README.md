@@ -17,6 +17,7 @@ Deployment instructions are in [charts/mlflow-oidc/README.md](charts/mlflow-oidc
 | ----------------------------- | ----------------------------------------------------------------------- |
 | `docker/Dockerfile`           | Upstream release image `ghcr.io/mlflow/mlflow:v<X.Y.Z>-full` + plugin   |
 | `charts/mlflow-oidc/`         | Wrapper chart; depends on upstream `oci://ghcr.io/mlflow/charts/mlflow` |
+| `examples/production/`        | Production values for the chart, render-tested in CI                    |
 | `scripts/versions.py`         | Reads, checks and bumps the version pins                                |
 | `scripts/test-chart.sh`       | Chart lint and render tests                                             |
 | `scripts/smoke-test-image.sh` | Starts the image and checks authentication is enforced                  |

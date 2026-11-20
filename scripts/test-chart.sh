@@ -3,7 +3,9 @@
 # chart dependency on first run. Usage: scripts/test-chart.sh
 set -euo pipefail
 
-chart="$(cd "$(dirname "$0")/../charts/mlflow-oidc" && pwd)"
+root="$(cd "$(dirname "$0")/.." && pwd)"
+chart="$root/charts/mlflow-oidc"
+production=(-f "$root/examples/production/values.yaml" -f "$root/examples/production/secrets.example.yaml")
 helm dependency build "$chart" > /dev/null
 
 required=(
@@ -30,6 +32,12 @@ expect_absent() {
     echo "FAIL: expected output not to match: $pattern" >&2
     exit 1
   fi
+}
+
+# Print one kind of document from a multi-document render.
+document() {
+  awk -v kind="kind: $2" '/^---/ { if (found) exit; doc = ""; next }
+    { doc = doc $0 "\n" } $0 == kind { found = 1 } END { if (found) printf "%s", doc }' <<< "$1"
 }
 
 expect_failure() {
@@ -62,14 +70,41 @@ out=$(render \
   --set 'oidc.scope=openid\,email' \
   --set oidc.automaticLoginRedirect=false \
   --set oidc.cache.redisUrl=redis://redis:6379/0 \
-  --set oidc.extraEnv.OIDC_USE_REFRESH_TOKEN=true \
-  --set oidc.secret.secretKey=fixed-key)
+  --set oidc.cache.keyPrefix=prod: \
+  --set oidc.useRefreshToken=true \
+  --set oidc.usersDbPool.size=5 \
+  --set oidc.usersDbPool.maxOverflow=0 \
+  --set oidc.usersDbPool.recycleSeconds=1800 \
+  --set oidc.extraEnv.PERMISSION_CACHE_TTL_SECONDS=60 \
+  --set oidc.secret.secretKey=fixed-key \
+  --set oidc.secret.sessionTokenEncryptionKey=fernet-key)
 expect_contains "$out" '^  OIDC_SCOPE: "openid,email"$'
 expect_contains "$out" '^  AUTOMATIC_LOGIN_REDIRECT: "false"$'
 expect_contains "$out" '^  CACHE_BACKEND: "redis"$'
 expect_contains "$out" '^  CACHE_REDIS_URL: "redis://redis:6379/0"$'
+expect_contains "$out" '^  CACHE_KEY_PREFIX: "prod:"$'
 expect_contains "$out" '^  OIDC_USE_REFRESH_TOKEN: "true"$'
+expect_contains "$out" '^  OIDC_DB_POOL_SIZE: "5"$'
+expect_contains "$out" '^  OIDC_DB_POOL_MAX_OVERFLOW: "0"$'
+expect_contains "$out" '^  OIDC_DB_POOL_RECYCLE_SECONDS: "1800"$'
+expect_contains "$out" '^  PERMISSION_CACHE_TTL_SECONDS: "60"$'
 expect_contains "$out" '^  SECRET_KEY: "fixed-key"$'
+expect_contains "$out" '^  SESSION_TOKEN_ENCRYPTION_KEY: "fernet-key"$'
+
+echo "Production example renders, with every credential in the Secret only"
+helm lint "$chart" "${production[@]}"
+out=$(helm template mlflow "$chart" "${production[@]}")
+secret=$(document "$out" Secret)
+expect_contains "$secret" '^  MLFLOW_BACKEND_STORE_URI: "postgresql://'
+expect_contains "$secret" '^  OIDC_CLIENT_SECRET: '
+expect_contains "$secret" '^  OIDC_USERS_DB_URI: "postgresql://'
+expect_contains "$secret" '^  CACHE_REDIS_URL: "rediss://'
+expect_contains "$secret" '^  SESSION_TOKEN_ENCRYPTION_KEY: '
+expect_contains "$(document "$out" ConfigMap)" '^  CACHE_BACKEND: "redis"$'
+for kind in Deployment ConfigMap; do
+  expect_absent "$(document "$out" "$kind")" 'CHANGE_ME|postgresql://|rediss://'
+done
+expect_contains "$(document "$out" Deployment)" '^                  key: MLFLOW_BACKEND_STORE_URI$'
 
 echo "secret.create=false leaves the Secret to the user"
 out=$(helm template mlflow "$chart" \
@@ -95,6 +130,10 @@ expect_failure "must contain a configMapRef and a secretRef" "${required[@]}" \
   --set oidc.resourceName=other
 expect_failure "app_name must be oidc-auth" "${required[@]}" \
   --set mlflow.server.value_options.app_name=null
+expect_failure "backendStoreUriFrom must be secretKeyRef" "${required[@]}" \
+  --set backendStoreUri=postgresql://db/mlflow
+expect_failure "so backendStoreUri is required" "${production[@]}" --set backendStoreUri=
+expect_failure "needs oidc.secret.create=true" "${production[@]}" --set oidc.secret.create=false
 render --set oidc.clientSecret= --set oidc.publicClient=true > /dev/null
 
 echo "All chart tests passed."

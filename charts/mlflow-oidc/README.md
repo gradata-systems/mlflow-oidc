@@ -40,9 +40,15 @@ Register a confidential OIDC client (authorization code flow) with:
   log in, and in `oidc.adminGroupName` (default `mlflow-admin`) to administer
   permissions.
 
-## Example: production values
+## Example: production
+
+[`examples/production`](https://github.com/gradata-systems/mlflow-oidc/tree/main/examples/production)
+is a complete, tested set of values: autoscaled replicas, PostgreSQL for both
+databases, Redis for the permission cache, S3 artifacts through an IAM role,
+and an HTTPS ingress. In outline:
 
 ```yaml
+# values.yaml: everything except credentials
 oidc:
   discoveryUrl: https://login.example.com/realms/main/.well-known/openid-configuration
   clientId: mlflow
@@ -50,44 +56,46 @@ oidc:
   groupName: ml-engineers
   adminGroupName: ml-platform-admins
   audience: mlflow
-  # The ingress controller's pod CIDR, so X-Forwarded-* headers are honoured.
-  trustedProxies: 10.0.0.0/8
+  trustedProxies: 10.0.0.0/8 # the ingress controller's pod CIDR
   sessionCookieSecure: true
-  # Shared permission cache across replicas; CACHE_REDIS_URL is in the Secret.
-  extraEnv:
-    CACHE_BACKEND: redis
-  # OIDC_CLIENT_SECRET, SECRET_KEY, OIDC_USERS_DB_URI and CACHE_REDIS_URL come
-  # from a Secret named `mlflow-oidc` that you manage (e.g. External Secrets).
-  secret:
-    create: false
 
 mlflow:
-  replicaCount: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
   mlflow:
-    backendStoreUriFrom:
+    backendStoreUriFrom: # reads the top-level backendStoreUri from the chart's Secret
       secretKeyRef:
-        name: mlflow-db
-        key: uri
+        name: mlflow-oidc
+        key: MLFLOW_BACKEND_STORE_URI
     artifactsDestination: s3://my-bucket/mlflow
   ingress:
     enabled: true
-    className: nginx
-    hosts:
-      - host: mlflow.example.com
-        paths:
-          - path: /
-            pathType: Prefix
-    tls:
-      - secretName: mlflow-example-com-tls
-        hosts: [mlflow.example.com]
-  resources:
-    requests:
-      cpu: 500m
-      memory: 1Gi
+    # hosts, tls, ...
 ```
 
-When the chart creates the Secret instead, set `oidc.clientSecret`,
-`oidc.usersDbUri` and `oidc.cache.redisUrl` (which also sets `CACHE_BACKEND`).
+```yaml
+# secrets.yaml: credentials, encrypted (e.g. SOPS) or kept out of Git
+backendStoreUri: postgresql://mlflow:...@postgres:5432/mlflow
+oidc:
+  clientSecret: ...
+  usersDbUri: postgresql://mlflow_auth:...@postgres:5432/mlflow_auth
+  cache:
+    redisUrl: rediss://:...@redis:6379/0 # also switches the cache to Redis
+  secret:
+    secretKey: ...
+    sessionTokenEncryptionKey: ...
+```
+
+```bash
+helm upgrade --install mlflow oci://ghcr.io/gradata-systems/charts/mlflow-oidc \
+  --version <chart version> --namespace mlflow --create-namespace \
+  -f values.yaml -f secrets.yaml
+```
+
+Every credential is a chart value, written to the chart's Secret and kept out
+of the Deployment and ConfigMap. To have a secrets operator manage the Secret
+instead, set `oidc.secret.create: false` (see `values.yaml`).
 
 ## Example: single-node evaluation
 
@@ -137,6 +145,10 @@ mlflow:
 - **Network policy.** If you enable `mlflow.networkPolicy`, the default egress
   rules allow HTTPS (the IdP) and common databases. Add Redis (6379) via
   `mlflow.networkPolicy.additionalEgressRules` if you use it.
-- **Other plugin settings** can be set through `oidc.extraEnv` (non-secret) and
-  `oidc.secret.extraEnv` (secret). See the
+- **Garbage collection.** With proxied artifacts (`artifactsDestination`),
+  `mlflow gc` deletes a run's artifacts through the MLflow server, which the
+  plugin protects, and the upstream `mlflow.garbageCollection` CronJob has no
+  credentials for it. Test it before relying on it.
+- **Other plugin settings** without an `oidc.*` value can be set through
+  `oidc.extraEnv` (non-secret) and `oidc.secret.extraEnv` (secret). See the
   [plugin configuration reference](https://github.com/mlflow-oidc/mlflow-oidc-auth/blob/main/docs/configuration.md).

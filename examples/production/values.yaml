@@ -1,0 +1,109 @@
+# Production values for the mlflow-oidc chart. See README.md in this directory.
+#
+# Two to four replicas behind an HTTPS ingress, PostgreSQL for both databases,
+# Redis for the shared permission cache, and S3 for artifacts through an IAM
+# role (EKS IRSA), so the pods hold no static AWS keys.
+#
+# Credentials are not in this file. They are chart values too, kept in a
+# separate file (secrets.example.yaml) that you encrypt or keep out of Git.
+#
+# Replace the example.com hosts, the bucket, the role ARN and the CIDR.
+
+oidc:
+  discoveryUrl: https://login.example.com/realms/main/.well-known/openid-configuration
+  clientId: mlflow
+  # Must match the redirect URI registered with the IdP exactly.
+  redirectUri: https://mlflow.example.com/callback
+  # Users outside groupName cannot log in; adminGroupName manages permissions.
+  groupName: ml-engineers
+  adminGroupName: ml-platform-admins
+  # Reject bearer tokens that were issued for other clients.
+  audience: mlflow
+  # The ingress controller's pod CIDR, so the X-Forwarded-Proto and -Host
+  # headers it sets are trusted.
+  trustedProxies: 10.0.0.0/8
+  sessionCookieSecure: true
+  # Renew sessions silently when the IdP token expires. Needs offline_access
+  # allowed for the client at the IdP.
+  # useRefreshToken: true
+
+  # At most 4 replicas x 4 workers x (5 + 5) = 160 connections to the users
+  # database. recycleSeconds stays below typical idle-connection timeouts.
+  usersDbPool:
+    size: 5
+    maxOverflow: 5
+    recycleSeconds: 1800
+
+  cache:
+    # The Redis URL is in the secrets file; this keeps the keys of this
+    # release apart from anything else in the same Redis database.
+    keyPrefix: "mlflow-prod:"
+
+mlflow:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+
+  mlflow:
+    # The tracking database URI is the top-level backendStoreUri value in the
+    # secrets file. The chart stores it in its Secret, and this reads it from
+    # there, so the password is not visible in the Deployment spec.
+    backendStoreUriFrom:
+      secretKeyRef:
+        name: mlflow-oidc
+        key: MLFLOW_BACKEND_STORE_URI
+    # The server proxies artifact uploads and downloads, so clients need no S3
+    # access and artifact access goes through the plugin's permission checks.
+    artifactsDestination: s3://example-mlflow-artifacts/mlflow
+
+  serviceAccount:
+    annotations:
+      # IAM role with s3:GetObject, PutObject, DeleteObject and ListBucket on
+      # the bucket above.
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mlflow
+
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+      # Artifacts can be large: no upload size limit, longer transfer timeouts.
+      nginx.ingress.kubernetes.io/proxy-body-size: "0"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    hosts:
+      - host: mlflow.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: mlflow-example-com-tls
+        hosts:
+          - mlflow.example.com
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+
+  # Allows DNS, HTTPS (the IdP, S3) and PostgreSQL by default; Redis is added.
+  networkPolicy:
+    enabled: true
+    additionalEgressRules:
+      - ports:
+          - protocol: TCP
+            port: 6379
+
+  # Spread replicas across zones. The labels assume the release is named
+  # "mlflow".
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: mlflow
+          app.kubernetes.io/instance: mlflow

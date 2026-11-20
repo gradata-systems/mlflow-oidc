@@ -21,6 +21,11 @@ Non-secret plugin settings, as a dict of env var name -> value. Unset values
   "AUTOMATIC_LOGIN_REDIRECT" $o.automaticLoginRedirect
   "TRUSTED_PROXIES" $o.trustedProxies
   "SESSION_COOKIE_SECURE" $o.sessionCookieSecure
+  "OIDC_USE_REFRESH_TOKEN" $o.useRefreshToken
+  "OIDC_DB_POOL_SIZE" $o.usersDbPool.size
+  "OIDC_DB_POOL_MAX_OVERFLOW" $o.usersDbPool.maxOverflow
+  "OIDC_DB_POOL_RECYCLE_SECONDS" $o.usersDbPool.recycleSeconds
+  "CACHE_KEY_PREFIX" $o.cache.keyPrefix
 }}
 {{- if $o.cache.redisUrl }}
 {{- $_ := set $env "CACHE_BACKEND" "redis" }}
@@ -48,6 +53,8 @@ taken from values, else from the existing Secret, else generated.
   "OIDC_USERS_DB_URI" $o.usersDbUri
   "CACHE_REDIS_URL" $o.cache.redisUrl
   "SECRET_KEY" $secretKey
+  "SESSION_TOKEN_ENCRYPTION_KEY" $o.secret.sessionTokenEncryptionKey
+  "MLFLOW_BACKEND_STORE_URI" .Values.backendStoreUri
 }}
 {{- include "mlflow-oidc.compact" (merge (dict) $o.secret.extraEnv $env) }}
 {{- end }}
@@ -107,6 +114,18 @@ would leave the pod without its OIDC settings.
 {{- end }}
 {{- if not (and $hasConfigMap $hasSecret) }}
 {{- fail (printf "mlflow.envFrom must contain a configMapRef and a secretRef named %q (oidc.resourceName), or the OIDC settings never reach the pod" $o.resourceName) }}
+{{- end }}
+{{- $from := (.Values.mlflow.mlflow.backendStoreUriFrom | default dict).secretKeyRef | default dict }}
+{{- $fromChartSecret := and (eq ($from.name | default "") $o.resourceName) (eq ($from.key | default "") "MLFLOW_BACKEND_STORE_URI") }}
+{{- if .Values.backendStoreUri }}
+{{- if not $o.secret.create }}
+{{- fail "backendStoreUri is stored in the chart's Secret, so it needs oidc.secret.create=true; with your own Secret, point mlflow.mlflow.backendStoreUriFrom at it instead" }}
+{{- end }}
+{{- if not $fromChartSecret }}
+{{- fail (printf "backendStoreUri is set, so mlflow.mlflow.backendStoreUriFrom must be secretKeyRef {name: %s, key: MLFLOW_BACKEND_STORE_URI}, or MLflow never reads it" $o.resourceName) }}
+{{- end }}
+{{- else if and $fromChartSecret $o.secret.create }}
+{{- fail "mlflow.mlflow.backendStoreUriFrom reads MLFLOW_BACKEND_STORE_URI from the chart's Secret, so backendStoreUri is required" }}
 {{- end }}
 {{- $appName := index .Values.mlflow.server.value_options "app_name" | default "" }}
 {{- if ne $appName "oidc-auth" }}
